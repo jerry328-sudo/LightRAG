@@ -1,0 +1,33 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: 'Simulate a failure to test email delivery'
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-upstream-main
+
+jobs:
+  sync:
+    if: github.repository == 'jerry328-sudo/LightRAG' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Test failure notification
+        if: github.event_name == 'workflow_dispatch' && inputs.test_notification
+        run: |
+          echo 'Intentional failure to test email delivery. No sync was attempted.'
+          exit 1
+
+      - name: Sync main with upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main --jq .message
