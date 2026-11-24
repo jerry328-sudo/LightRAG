@@ -34,6 +34,7 @@ Makefile
 /output_complete
 /rag_storage
 /inputs
+/.lightrag-deploy
 
 # Python version manager file
 .python-version

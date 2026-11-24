@@ -53,6 +53,7 @@ local_neo4jWorkDir/
 neo4jWorkDir/
 
 # Data & Storage
+/.lightrag-deploy/
 inputs/
 output/
 rag_storage/

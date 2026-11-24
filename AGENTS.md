@@ -439,3 +439,7 @@ These apply to every review finding, automated reviews included.
 - If this repo is a fork of `HKUDS/LightRAG`. Target to `HKUDS/LightRAG` when creating PRs, not the fork's own repo.
 - PR descriptions should include: summary, motivation, linked issues if applied, what's changed, what's broken and how it works.
 - Write commit messages (subject and body) in English. Commit messages are repository artifacts — like code comments and log messages — not conversational replies, so they follow the English code-style rule above regardless of any per-conversation working language.
+
+## Upstream Merge Compatibility
+
+Fork customizations must preserve the ability to merge future updates from `HKUDS/LightRAG`. **Keep upstream core code intact whenever changing it would interfere with an upstream merge.** Choose another implementation through existing configuration, public APIs, or extension points. Keep additional behavior in fork-owned adapters or modules, and keep unrelated refactors, renames, and formatting out of customization changes.
