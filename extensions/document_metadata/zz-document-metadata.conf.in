@@ -1,0 +1,6 @@
+[Service]
+Environment=PYTHONPATH=@DEPLOY_ROOT@
+Environment=PYTHONDONTWRITEBYTECODE=1
+BindReadOnlyPaths=@DEPLOY_ROOT@/extensions
+ExecStart=
+ExecStart=@DEPLOY_ROOT@/releases/current/.venv/bin/python -m extensions.document_metadata.serve --host 127.0.0.1 --port @PORT@ --workers 2

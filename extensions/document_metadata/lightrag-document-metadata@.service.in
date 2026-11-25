@@ -1,0 +1,24 @@
+[Unit]
+Description=LightRAG document metadata (%i)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lightrag
+Group=lightrag
+WorkingDirectory=@DEPLOY_ROOT@/%i
+Environment=PYTHONPATH=@DEPLOY_ROOT@
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=@DEPLOY_ROOT@/releases/current/.venv/bin/python -m extensions.document_metadata run
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=tmpfs
+ProtectSystem=strict
+BindReadOnlyPaths=@DEPLOY_ROOT@/releases @DEPLOY_ROOT@/config @DEPLOY_ROOT@/extensions @DEPLOY_ROOT@/%i
+
+[Install]
+WantedBy=multi-user.target
