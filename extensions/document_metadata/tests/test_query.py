@@ -23,7 +23,10 @@ async def test_query_documents_follow_stored_chunk_ownership():
     }
     lookup = AsyncMock(
         return_value=[
-            {"id": "c2", "file_path": "281.pdf", "full_doc_id": "doc-b"},
+            {
+                "id": "c2", "file_path": "281.pdf", "full_doc_id": "doc-b",
+                "sidecar": {"type": "drawing", "id": "im-b"},
+            },
             None,
             {"id": "c1", "file_path": "273.pdf", "full_doc_id": "doc-a"},
         ]
@@ -50,3 +53,4 @@ async def test_query_documents_follow_stored_chunk_ownership():
         "doc-b",
         None,
     ]
+    assert [chunk.get("image_id") for chunk in data["chunks"]] == [None, None, "im-b", None]

@@ -126,14 +126,20 @@ def main():
 
     from .content import register_content_route
     from .documents import register_document_routes
+    from .images import register_image_route
     from .query import attach_query_document_ids
 
     create_routes = lightrag_server.create_document_routes
     create_queries = lightrag_server.create_query_routes
+    curation_file = os.getenv("LIGHTRAG_GRAPH_CURATION_FILE")
 
     @wraps(create_routes)
     def create_document_routes(rag, doc_manager, api_key=None):
         routes = create_routes(rag, doc_manager, api_key)
+        if curation_file:
+            from extensions.graph_curation.rules import attach_graph_curation
+
+            attach_graph_curation(rag, curation_file)
         if isinstance(rag.doc_status, PGDocStatusStorage):
             attach_document_metadata(rag.doc_status)
             agent_routes = APIRouter(
@@ -145,6 +151,7 @@ def main():
             )
             register_document_routes(agent_routes, rag)
             register_content_route(agent_routes, rag, doc_manager.input_dir)
+            register_image_route(agent_routes, rag, doc_manager.input_dir)
             routes.include_router(agent_routes)
         return routes
 
@@ -158,7 +165,8 @@ def main():
                     route.description += (
                         "\n\nRetrieved chunks and references include `document_id` "
                         "when their stored source can be verified. Use it to open "
-                        "the document's metadata or read a specific passage."
+                        "the document's metadata or read a specific passage. "
+                        "Image description hits also include `image_id` for image retrieval."
                     )
         return routes
 

@@ -25,6 +25,9 @@ def arguments():
     backfill.add_argument("records", type=Path)
     backfill.add_argument("--revision", required=True)
     backfill.add_argument("--dry-run", action="store_true")
+    enrich = commands.add_parser("enrich")
+    enrich.add_argument("batch", type=Path)
+    enrich.add_argument("--dry-run", action="store_true")
     import_one = commands.add_parser("import-one")
     import_one.add_argument("file_path")
     import_one.add_argument("metadata", type=Path)
@@ -99,6 +102,12 @@ async def run(args):
         if args.command == "backfill":
             return await backfill_okf(
                 db, workspace, args.records, args.revision, args.dry_run
+            )
+        if args.command == "enrich":
+            from .enrich import enrich
+
+            return await enrich(
+                db, workspace, read_json(args.batch), dry_run=args.dry_run
             )
         if args.command == "import-one":
             metadata = read_json(args.metadata)

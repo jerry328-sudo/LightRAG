@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lightrag-mathpix"
+version = "0.1.1"
+description = "Mathpix PDF parser plugin for LightRAG"
+requires-python = ">=3.11"
+dependencies = ["lightrag-hku>=1.5.9", "httpx>=0.28.1"]
+
+[project.entry-points."lightrag.parsers"]
+mathpix = "lightrag_mathpix:register"
+
+[tool.setuptools.packages.find]
+include = ["lightrag_mathpix"]

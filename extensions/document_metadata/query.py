@@ -6,6 +6,8 @@ from functools import wraps
 
 import asyncpg
 
+from lightrag.chunk_schema import normalize_chunk_sidecar
+
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,9 @@ def attach_query_document_ids(rag):
             ):
                 document_id = row["full_doc_id"]
                 chunk["document_id"] = document_id
+                sidecar = normalize_chunk_sidecar(row)
+                if sidecar and sidecar["type"] == "drawing":
+                    chunk["image_id"] = sidecar["id"]
                 if chunk.get("reference_id"):
                     documents_by_reference[chunk["reference_id"]].add(document_id)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from bisect import bisect_right
@@ -20,6 +21,11 @@ from pydantic import BaseModel, Field
 from lightrag.chunk_schema import normalize_chunk_sidecar
 from lightrag.constants import FULL_DOCS_FORMAT_PENDING_PARSE
 from lightrag.utils_pipeline import resolve_sidecar_uri, strip_lightrag_doc_prefix
+
+
+_MAX_EXCERPT_CHARS = 16000
+_PARAGRAPH_END = re.compile(r"\n[ \t\r]*\n")
+_PASSAGE_PATTERN = r"^[0-9a-f]{64}\.[0-9]{1,12}\.[0-9]{1,12}$"
 
 
 class ContentOptions(BaseModel):
@@ -78,7 +84,7 @@ class ContentOptions(BaseModel):
     max_chars: int = Field(
         default=6000,
         ge=256,
-        le=16000,
+        le=_MAX_EXCERPT_CHARS,
         description="Maximum text characters in a bounded response.",
     )
     limit: int = Field(
@@ -86,6 +92,20 @@ class ContentOptions(BaseModel):
         ge=1,
         le=40,
         description="Maximum search hits or outline entries in the response.",
+    )
+    include_citations: bool = Field(
+        default=False,
+        description="Return a versioned passage locator with each excerpt.",
+    )
+    passage: str | None = Field(
+        default=None,
+        max_length=90,
+        pattern=_PASSAGE_PATTERN,
+        description=(
+            "Read the exact excerpt identified by a returned passage locator. "
+            "For a chunk locator, include its chunk_id. Other selectors and "
+            "continuation offsets are unavailable with a passage locator."
+        ),
     )
 
 
@@ -300,8 +320,66 @@ def _page_regions(document: ParsedText, start: int, end: int) -> list[tuple[int,
     return ranges
 
 
+def _bounded_end(text: str, start: int, end: int, remaining: int) -> int:
+    stop = min(end, start + remaining)
+    if stop >= end:
+        return stop
+    # Preserve continuation offsets and the hard budget. A single paragraph
+    # exceeding the budget must still make forward progress.
+    boundary = max(
+        (match.end() for match in _PARAGRAPH_END.finditer(text, start, stop)),
+        default=start,
+    )
+    return boundary if text[start:boundary].strip() else stop
+
+
+def _text_revision(text: str, anchors, document_revision: str = "") -> str:
+    digest = hashlib.sha256(text.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(document_revision.encode("ascii"))
+    digest.update(
+        json.dumps(anchors, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    return digest.hexdigest()
+
+
+def _document_revision(document: ParsedText) -> str:
+    anchors = [
+        (
+            block.block_id,
+            block.start,
+            block.end,
+            block.heading,
+            block.level,
+            block.pages,
+        )
+        for block in document.blocks
+    ]
+    return _text_revision(document.text, anchors)
+
+
+def _citation(revision: str | None, start: int, end: int) -> dict:
+    return {"passage": f"{revision}.{start}.{end}"} if revision and start < end else {}
+
+
+def _passage_bounds(passage: str, revision: str, length: int) -> tuple[int, int]:
+    recorded_revision, start, end = passage.split(".")
+    if recorded_revision != revision:
+        raise HTTPException(409, "The cited text has changed. Request a new excerpt.")
+    lower, upper = int(start), int(end)
+    if not 0 <= lower < upper <= length or upper - lower > _MAX_EXCERPT_CHARS:
+        raise HTTPException(
+            416,
+            "The cited range is outside the parsed text or exceeds the excerpt limit.",
+        )
+    return lower, upper
+
+
 def _read_regions(
-    document: ParsedText, regions: list[tuple[int, int]], options: ContentOptions
+    document: ParsedText,
+    regions: list[tuple[int, int]],
+    options: ContentOptions,
+    revision: str | None = None,
 ) -> dict:
     skip = options.offset
     count = 0
@@ -313,12 +391,16 @@ def _read_regions(
             continue
         start += skip
         skip = 0
-        stop = min(end, start + options.max_chars - count)
+        stop = _bounded_end(document.text, start, end, options.max_chars - count)
         segments.append(
-            {"text": document.text[start:stop], **document.location(start, stop)}
+            {
+                "text": document.text[start:stop],
+                **document.location(start, stop),
+                **_citation(revision, start, stop),
+            }
         )
         count += stop - start
-        if count >= options.max_chars:
+        if stop < end or count >= options.max_chars:
             break
     end_offset = options.offset + count
     return {
@@ -327,7 +409,9 @@ def _read_regions(
     }
 
 
-def _find_lines(document: ParsedText, options: ContentOptions) -> dict:
+def _find_lines(
+    document: ParsedText, options: ContentOptions, revision: str | None = None
+) -> dict:
     flags = 0 if options.case_sensitive else regex.IGNORECASE
     pattern = regex.escape(options.q) if options.match == "literal" else options.q
     try:
@@ -378,6 +462,7 @@ def _find_lines(document: ParsedText, options: ContentOptions) -> dict:
                     "column": found.start() + 1,
                     "text": snippet,
                     **document.location(before, after),
+                    **_citation(revision, before, after),
                 }
             )
             remaining -= len(snippet)
@@ -390,16 +475,20 @@ def _find_lines(document: ParsedText, options: ContentOptions) -> dict:
 
 
 async def _read_chunks(
-    rag, status, document_id: str, document: ParsedText, options: ContentOptions
+    rag,
+    status,
+    document_id: str,
+    document: ParsedText,
+    options: ContentOptions,
+    document_revision: str | None = None,
 ) -> dict:
     ordered = status.chunks_list or []
     try:
         anchor = ordered.index(options.chunk_id)
     except ValueError as error:
         raise HTTPException(404, "Chunk not found in this document") from error
-    selected = ordered[
-        max(0, anchor - options.neighbor_chunks) : anchor + options.neighbor_chunks + 1
-    ]
+    neighbors = 0 if options.passage else options.neighbor_chunks
+    selected = ordered[max(0, anchor - neighbors) : anchor + neighbors + 1]
     rows = await rag.text_chunks.get_by_ids(selected)
     texts = {
         chunk_id: row
@@ -418,9 +507,7 @@ async def _read_chunks(
         if skip >= len(text):
             skip -= len(text)
             continue
-        excerpt = text[skip : skip + options.max_chars - count]
-        skip = 0
-        item = {"chunk_id": chunk_id, "text": excerpt}
+        location = {}
         # Identical stored chunks may be shared across documents. A document's
         # membership authorizes its text, but another document's anchors do not.
         if row.get("full_doc_id") == document_id:
@@ -431,14 +518,32 @@ async def _read_chunks(
                 if ref["type"] == "block" and ref["id"] in blocks
             ]
             if refs:
-                item.update(
-                    document.location(
-                        min(ref.start for ref in refs), max(ref.end for ref in refs)
-                    )
+                location = document.location(
+                    min(ref.start for ref in refs), max(ref.end for ref in refs)
                 )
+        revision = (
+            _text_revision(text, location, document_revision)
+            if document_revision
+            else None
+        )
+        if options.passage:
+            start, end = _passage_bounds(options.passage, revision, len(text))
+        else:
+            start = skip
+            end = _bounded_end(text, start, len(text), options.max_chars - count)
+        excerpt = text[start:end]
+        skip = 0
+        item = {
+            "chunk_id": chunk_id,
+            "text": excerpt,
+            **location,
+            **_citation(revision, start, end),
+        }
         results.append(item)
         count += len(excerpt)
-        if count >= options.max_chars:
+        if options.passage:
+            return {"chunks": results, "next_offset": None}
+        if end < len(text) or count >= options.max_chars:
             break
     end = options.offset + count
     return {"chunks": results, "next_offset": end if end < total else None}
@@ -448,6 +553,14 @@ def _validate_scope(options: ContentOptions) -> str:
     lines = options.line_start is not None or options.line_end is not None
     pages = options.page_start is not None or options.page_end is not None
     search = options.q is not None
+    if options.passage:
+        if lines or pages or search or options.section is not None or options.offset:
+            raise HTTPException(
+                422, "A passage locator can only be paired with its chunk ID."
+            )
+        if options.scope not in (None, "range"):
+            raise HTTPException(422, "Passage locators require a range read.")
+        return "range"
     exclusive = (pages, options.section is not None, options.chunk_id is not None)
     if sum(exclusive) > 1 or (any(exclusive) and (lines or search)):
         raise HTTPException(
@@ -570,12 +683,31 @@ def register_content_route(
         document = await asyncio.to_thread(
             ParsedText.from_record, record, document_id, text, input_root
         )
+        revision = (
+            await asyncio.to_thread(_document_revision, document)
+            if scope == "range" and (options.include_citations or options.passage)
+            else None
+        )
         if scope == "outline":
             payload = _outline(document, options, bool(status.chunks_list))
         elif options.q is not None:
-            payload = await asyncio.to_thread(_find_lines, document, options)
+            payload = await asyncio.to_thread(_find_lines, document, options, revision)
         elif options.chunk_id is not None:
-            payload = await _read_chunks(rag, status, document_id, document, options)
+            payload = await _read_chunks(
+                rag, status, document_id, document, options, revision
+            )
+        elif options.passage:
+            start, end = _passage_bounds(options.passage, revision, len(text))
+            payload = {
+                "segments": [
+                    {
+                        "text": text[start:end],
+                        **document.location(start, end),
+                        **_citation(revision, start, end),
+                    }
+                ],
+                "next_offset": None,
+            }
         else:
             if options.section is not None:
                 regions = [_section_region(document, options.section)]
@@ -590,5 +722,5 @@ def register_content_route(
                         options.line_end or len(document.starts),
                     )
                 ]
-            payload = _read_regions(document, regions, options)
+            payload = _read_regions(document, regions, options, revision)
         return {"document_id": document_id, "scope": scope, **payload}

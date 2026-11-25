@@ -209,3 +209,77 @@ def test_chunk_lookup_requires_membership_and_reads_only_requested_neighbors():
     rag.text_chunks.get_by_ids.assert_awaited_once_with(
         ["chunk-before", "chunk-centre", "chunk-after"]
     )
+
+
+def test_range_continues_at_paragraph_boundary_and_replays_exact_cited_passage():
+    first = "Wear follows ampere-hour throughput. " * 5
+    second = "Temperature accelerates calendar ageing. " * 4
+    body = first + "\n\n" + second
+    client, _ = _document({"parse_format": "raw", "content": body})
+    path = "/documents/doc-test/content"
+    options = {"line_start": 1, "max_chars": 256, "include_citations": True}
+
+    first_part = client.get(path, params=options).json()
+    excerpt = first_part["segments"][0]
+    assert excerpt["text"] == first + "\n\n"
+    assert first_part["next_offset"] == len(excerpt["text"])
+    second_part = client.get(
+        path, params={**options, "offset": first_part["next_offset"]}
+    ).json()
+    assert second_part["segments"][0]["text"] == second
+    assert second_part["next_offset"] is None
+
+    replay = client.get(path, params={"passage": excerpt["passage"]})
+    assert replay.status_code == 200
+    assert replay.json()["segments"] == [excerpt]
+    assert "pages" not in excerpt
+
+
+def test_citation_rejects_reparse_that_changes_verified_pages(tmp_path):
+    body = "Compare the electrode conditions."
+    uri = _sidecar(tmp_path, [("Methods", 1, body, [12])])
+    client, _ = _document(
+        {
+            "parse_format": "lightrag",
+            "content": "{{LRdoc}}" + body,
+            "sidecar_location": uri,
+        },
+        input_dir=tmp_path,
+    )
+    path = "/documents/doc-test/content"
+    original = client.get(
+        path, params={"page_start": 12, "include_citations": True}
+    ).json()["segments"][0]
+    assert original["pages"] == [12]
+    blocks = next(tmp_path.rglob("*.blocks.jsonl"))
+    blocks.write_text(blocks.read_text().replace('"anchor": 12', '"anchor": 13'))
+
+    assert client.get(path, params={"passage": original["passage"]}).status_code == 409
+    current = client.get(
+        path, params={"page_start": 13, "include_citations": True}
+    ).json()["segments"][0]
+    assert current["text"] == original["text"] and current["pages"] == [13]
+    assert current["passage"] != original["passage"]
+
+
+def test_chunk_citation_replays_only_its_owned_chunk_and_refuses_changed_text():
+    client, rag = _document(
+        {"parse_format": "raw", "content": "Indexed source document."},
+        chunks=["chunk-neighbor", "chunk-source"],
+    )
+    row = {"content": "Measured electrolyte concentration: 0.5 M."}
+    rag.text_chunks.get_by_ids.return_value = [{"content": "Adjacent chunk"}, row]
+    path = "/documents/doc-test/content"
+    response = client.get(
+        path, params={"chunk_id": "chunk-source", "include_citations": True}
+    ).json()
+    excerpt = response["chunks"][1]
+    options = {"passage": excerpt["passage"], "chunk_id": "chunk-source"}
+
+    rag.text_chunks.get_by_ids.return_value = [row]
+    assert client.get(path, params=options).json()["chunks"] == [excerpt]
+    rag.text_chunks.get_by_ids.assert_awaited_with(["chunk-source"])
+    rag.text_chunks.get_by_ids.return_value = [
+        {"content": "A different indexed chunk."}
+    ]
+    assert client.get(path, params=options).status_code == 409
