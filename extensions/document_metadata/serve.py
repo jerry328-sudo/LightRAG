@@ -112,6 +112,8 @@ def attach_document_metadata(storage):
 
 
 def main():
+    from fastapi import APIRouter, Depends
+
     from lightrag.api.config import initialize_config
     from lightrag.api.run_with_gunicorn import main as run_gunicorn
 
@@ -119,18 +121,50 @@ def main():
     os.environ["LIGHTRAG_GUNICORN_MODE"] = "1"
 
     from lightrag.api import lightrag_server
+    from lightrag.api.utils_api import get_combined_auth_dependency
     from lightrag.kg.postgres_impl import PGDocStatusStorage
 
+    from .content import register_content_route
+    from .documents import register_document_routes
+    from .query import attach_query_document_ids
+
     create_routes = lightrag_server.create_document_routes
+    create_queries = lightrag_server.create_query_routes
 
     @wraps(create_routes)
-    def create_document_routes(rag, *args, **kwargs):
+    def create_document_routes(rag, doc_manager, api_key=None):
+        routes = create_routes(rag, doc_manager, api_key)
         if isinstance(rag.doc_status, PGDocStatusStorage):
             attach_document_metadata(rag.doc_status)
-        return create_routes(rag, *args, **kwargs)
+            agent_routes = APIRouter(
+                dependencies=[
+                    Depends(
+                        get_combined_auth_dependency(api_key, respect_whitelist=False)
+                    )
+                ]
+            )
+            register_document_routes(agent_routes, rag)
+            register_content_route(agent_routes, rag, doc_manager.input_dir)
+            routes.include_router(agent_routes)
+        return routes
+
+    @wraps(create_queries)
+    def create_query_routes(rag, *args, **kwargs):
+        routes = create_queries(rag, *args, **kwargs)
+        if isinstance(rag.doc_status, PGDocStatusStorage):
+            attach_query_document_ids(rag)
+            for route in routes.routes:
+                if route.path == "/query/data":
+                    route.description += (
+                        "\n\nRetrieved chunks and references include `document_id` "
+                        "when their stored source can be verified. Use it to open "
+                        "the document's metadata or read a specific passage."
+                    )
+        return routes
 
     # Let the regular application still own authentication and serialization.
     lightrag_server.create_document_routes = create_document_routes
+    lightrag_server.create_query_routes = create_query_routes
     run_gunicorn()
 
 
